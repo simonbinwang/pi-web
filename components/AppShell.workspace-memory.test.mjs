@@ -37,6 +37,19 @@ test("all active-session transitions share one persistence effect", () => {
 test("workspace restoration remains inside the cross-project branch", () => {
   assert.match(
     callbackBody("handleCwdChange", "handleSelectSession"),
-    /if \(currentProject !== newProject\) \{[\s\S]*?restoreWorkspaceContext\(newProject\);[\s\S]*?\}/,
+    /if \(currentProject !== newProject\) \{[\s\S]*?restoreWorkspaceContext\(newProject\)/,
+  );
+});
+
+test("workspace restoration starts from the loaded session catalog before a network fallback", () => {
+  const body = callbackBody("restoreWorkspaceContext", "handleCwdChange");
+  const catalogLookup = body.indexOf("sessionCatalog.find");
+  const networkFallback = body.indexOf('fetch("/api/sessions")');
+
+  assert.notEqual(catalogLookup, -1, "workspace restore does not inspect the loaded session catalog");
+  assert.notEqual(networkFallback, -1, "workspace restore lost its live-list fallback");
+  assert.ok(
+    catalogLookup < networkFallback,
+    "workspace restore waits for the network before using the loaded session catalog",
   );
 });

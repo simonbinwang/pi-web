@@ -509,44 +509,55 @@ export function AppShell() {
   }, [initialNavigation]);
 
   // Restore the workspace's last open session after switching to it. Called
-  // from handleCwdChange once the outgoing context has been reset. The session
-  // is looked up against the live list so a deleted or drifted session falls
-  // back to the default welcome page instead of erroring.
+  // from handleCwdChange once the outgoing context has been reset. Prefer the
+  // session catalog already loaded by the sidebar so chat loading can begin in
+  // the same turn as the project switch; only hit the network as a fallback.
   const restoreWorkspaceContext = useCallback((projectKey: string) => {
     const token = ++workspaceRestoreTokenRef.current;
     const lastOpenSessionId = getLastOpenSession(projectKey);
-    if (!lastOpenSessionId) return;
+    if (!lastOpenSessionId) return false;
+
+    const selectRestoredSession = (session: SessionInfo): boolean => {
+      if (token !== workspaceRestoreTokenRef.current) return false; // stale switch
+      if (workspaceKeyOf(session) !== projectKey) {
+        // Defensive: the remembered session drifted out of this workspace.
+        clearLastOpen(projectKey);
+        return false;
+      }
+      // Selecting the session must remount the chat with the session
+      // present: useAgentSession loads content in a mount-only effect.
+      setSelectedSession(session);
+      setSessionKey((k) => k + 1);
+      if (new URLSearchParams(window.location.search).get("session") !== session.id) {
+        router.replace(`?session=${encodeURIComponent(session.id)}`, { scroll: false });
+      }
+      return true;
+    };
+
+    const catalogSession = sessionCatalog.find((session) => session.id === lastOpenSessionId);
+    if (catalogSession) {
+      return selectRestoredSession(catalogSession);
+    }
+
     void fetch("/api/sessions")
       .then((r) => (r.ok ? (r.json() as Promise<{ sessions: SessionInfo[] }>) : null))
       .then((d) => {
-        if (token !== workspaceRestoreTokenRef.current) return; // stale switch
-        const s = d?.sessions.find((x) => x.id === lastOpenSessionId);
-        if (!s) {
+        if (token !== workspaceRestoreTokenRef.current) return;
+        const session = d?.sessions.find((candidate) => candidate.id === lastOpenSessionId);
+        if (!session) {
           // The list loaded but the remembered session is gone — forget it.
           // When the list itself failed (d === null) keep the memory so a
           // later switch retries the restore.
           if (d) clearLastOpen(projectKey);
           return;
         }
-        if (workspaceKeyOf(s) !== projectKey) {
-          // Defensive: the remembered session drifted out of this workspace.
-          clearLastOpen(projectKey);
-          return;
-        }
-        // Selecting the session must remount the chat with the session
-        // present: useAgentSession loads content in a mount-only effect, so
-        // the null-session welcome mount from the switch would never load
-        // the restored session's messages.
-        setSelectedSession(s);
-        setSessionKey((k) => k + 1);
-        if (new URLSearchParams(window.location.search).get("session") !== s.id) {
-          router.replace(`?session=${encodeURIComponent(s.id)}`, { scroll: false });
-        }
+        selectRestoredSession(session);
       })
       .catch(() => {
         // Network hiccup: keep the remembered session for a later retry.
       });
-  }, [router]);
+    return false;
+  }, [router, sessionCatalog]);
 
   const handleCwdChange = useCallback((
     cwd: string | null,
@@ -607,8 +618,12 @@ export function AppShell() {
       setActiveFileTabId(null);
       setRightPanelOpen(false);
       // Restore the workspace we switched to: its last open session, or keep
-      // the default welcome page when none is remembered.
-      restoreWorkspaceContext(newProject);
+      // the default welcome page when none is remembered. A catalog hit also
+      // updates the URL synchronously, so do not overwrite it with `/`.
+      if (!restoreWorkspaceContext(newProject)) {
+        router.replace("/", { scroll: false });
+      }
+      return;
     }
     router.replace("/", { scroll: false });
   }, [activeCwd, invalidateWorkspaceRestore, newSessionCwd, router, selectedSession, restoreWorkspaceContext]);

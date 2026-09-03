@@ -1,6 +1,6 @@
 import type { NextConfig } from "next";
 import { readFileSync } from "fs";
-import { dirname, join } from "path";
+import { dirname, join, resolve } from "path";
 import { fileURLToPath } from "url";
 
 const configDir = dirname(fileURLToPath(import.meta.url));
@@ -12,7 +12,10 @@ try {
 } catch { /* package not found, use default */ }
 
 const nextConfig: NextConfig = {
-  outputFileTracingRoot: configDir,
+  outputFileTracingRoot: resolve(configDir, "../.."),
+  turbopack: {
+    root: resolve(configDir, "../.."),
+  },
   serverExternalPackages: [
     "node-pty",
     "undici",

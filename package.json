@@ -39,7 +39,7 @@
   },
   "dependencies": {
     "@earendil-works/pi-agent-core": "0.84.3",
-    "@earendil-works/pi-ai": "0.84.3",
+    "@earendil-works/pi-ai": "file:../../pi-worktrees/dev/packages/ai",
     "@earendil-works/pi-coding-agent": "0.84.3",
     "@earendil-works/pi-tui": "0.84.3",
     "ansi_up": "^6.0.6",

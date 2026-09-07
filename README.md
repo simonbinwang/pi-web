@@ -163,6 +163,32 @@ npm run lint
 
 Do not run `next build` or `npm run build` during normal development. It writes to `.next/` and can interfere with the development server; leave builds for release work.
 
+### Developing with a local Pi checkout
+
+Create an ignored `local-pi.json` in the repository root:
+
+```json
+{
+  "piSourceDir": "/absolute/path/to/pi"
+}
+```
+
+Build Pi after changing it, then start Pi Web with links to the local Pi packages:
+
+```bash
+npm run local-pi:build
+npm run dev:local-pi
+```
+
+For a local production-mode run:
+
+```bash
+npm run build:local-pi
+npm run start:local-pi
+```
+
+`PI_SOURCE_DIR=/path/to/pi` overrides `local-pi.json` for a single command. These commands do not install dependencies or watch Pi source files. Run `npm install` in both repositories yourself, and rebuild/restart after changing Pi.
+
 Contributor guides: [Internationalization](./docs/i18n.md) and [Release process](./docs/release.md).
 
 ## Repository Layout

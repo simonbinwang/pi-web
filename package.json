@@ -30,16 +30,21 @@
   "scripts": {
     "dev": "next dev -H 127.0.0.1 -p 30141",
     "dev:lan": "next dev -H 0.0.0.0 -p 30141",
+    "dev:local-pi": "node scripts/local-pi.mjs dev",
+    "local-pi:link": "node scripts/local-pi.mjs link",
+    "local-pi:build": "node scripts/local-pi.mjs build",
     "build": "next build --webpack",
+    "build:local-pi": "node scripts/local-pi.mjs build-web",
     "start": "next start -H 127.0.0.1 -p 30141",
     "start:lan": "next start -H 0.0.0.0 -p 30141",
+    "start:local-pi": "node scripts/local-pi.mjs start-web",
     "lint": "eslint .",
     "test": "node --experimental-strip-types --test \"app/**/*.test.mjs\" \"components/**/*.test.mjs\" \"hooks/**/*.test.mjs\" \"lib/**/*.test.mjs\" \"public/**/*.test.mjs\"",
     "release": "npm version patch --no-git-tag-version && npm run build && npm publish --access public"
   },
   "dependencies": {
     "@earendil-works/pi-agent-core": "0.84.3",
-    "@earendil-works/pi-ai": "file:../../pi-worktrees/dev/packages/ai",
+    "@earendil-works/pi-ai": "0.84.3",
     "@earendil-works/pi-coding-agent": "0.84.3",
     "@earendil-works/pi-tui": "0.84.3",
     "ansi_up": "^6.0.6",

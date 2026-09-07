@@ -115,6 +115,32 @@ npm run lint
 
 日常开发时不要运行 `next build` 或 `npm run build`。它们会写入 `.next/`，可能干扰开发服务器；仅在发布流程中执行构建。
 
+### 使用本地 Pi 开发
+
+在仓库根目录创建不会提交的 `local-pi.json`：
+
+```json
+{
+  "piSourceDir": "/本地/pi/仓库的绝对路径"
+}
+```
+
+修改 Pi 后先构建 Pi，再使用本地 Pi packages 启动 Pi Web：
+
+```bash
+npm run local-pi:build
+npm run dev:local-pi
+```
+
+以本地 production 模式运行：
+
+```bash
+npm run build:local-pi
+npm run start:local-pi
+```
+
+单次命令可以用 `PI_SOURCE_DIR=/path/to/pi` 覆盖 `local-pi.json`。这些命令不会安装依赖或监听 Pi 源码；请自行在两个仓库运行 `npm install`，修改 Pi 后手动重新构建并重启。
+
 贡献者文档：[国际化](./docs/i18n.md)和[发布流程](./docs/release.md)。
 
 ## 仓库结构

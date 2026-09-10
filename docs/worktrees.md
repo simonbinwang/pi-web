@@ -1,87 +1,71 @@
 # Worktrees in Pi Web
 
-Pi Web can show all Git worktrees for one project in the sidebar. Use this when you want to keep separate checkouts for different branches, while keeping the project's sessions grouped together.
+Pi Web can show all Git worktrees for one project in the sidebar. Use this to keep separate checkouts for different branches while keeping related sessions grouped together.
 
 ## When the Worktree Control Appears
 
-The worktree switcher appears below the project picker when the selected directory is a Git repository root.
+The worktree switcher appears when the selected directory is anywhere inside a readable Git checkout. This includes a checkout root and nested directories such as a package in a monorepo. The control is available even before the repository has a linked worktree, so you can create the first one without leaving your current directory.
 
-It is hidden when:
-
-- The selected directory is not a Git repository.
-- The selected directory is inside a repository, but not the repository root.
-- Git cannot read the repository's worktree list.
-
-If you are inside a repo subdirectory, open the repository root from the project picker to manage worktrees.
+It is hidden when the selected directory is outside Git or Git cannot read the repository's worktree list.
 
 ## Switching Worktrees
 
-Use the worktree switcher to choose which checkout Pi Web should use for new work in that project.
+Pi Web preserves the selected directory's path relative to its checkout. For example, switching from:
 
-Switching worktrees affects:
+```text
+/repo/packages/app
+```
+
+to a worktree at `/repo-worktrees/feature` selects:
+
+```text
+/repo-worktrees/feature/packages/app
+```
+
+The selected directory affects:
 
 - New sessions started from the sidebar.
-- The file Explorer.
+- The File Explorer.
 - File mentions inserted from the Explorer.
 
-Existing sessions stay grouped under the same project. Opening an existing session moves the effective working directory back to that session's checkout.
+Existing sessions keep their original working directory. Opening one moves the effective working directory back to that session's checkout.
+
+If a worktree does not contain the corresponding relative directory, it remains visible but is disabled and explains which directory is missing. Pi Web never falls back silently to that worktree's root.
 
 ## Creating a Worktree
 
-Choose `New worktree...` from the worktree menu and enter a branch name.
-
-Pi Web creates the checkout at:
+Choose `New worktree...` and enter a branch name. Pi Web creates the checkout at:
 
 ```text
-<repo>-worktrees/<branch>
+<repo>-worktrees/<sanitized-branch>
 ```
 
-For example, if the main checkout is:
+The directory name replaces branch separators, whitespace, and filesystem-reserved characters with `-`; the Git branch name itself is unchanged. If the branch exists, Pi Web adds a worktree for it; otherwise it creates the branch from the current `HEAD`. When the corresponding relative directory exists, Pi Web selects it automatically.
 
-```text
-/Users/alex/Documents/Workspace/pi-web
-```
-
-and you create branch `codex/worktree-help`, the worktree is created under:
-
-```text
-/Users/alex/Documents/Workspace/pi-web-worktrees/codex-worktree-help
-```
-
-If the branch already exists, Pi Web adds a worktree for that branch. If it does not exist, Pi Web creates the branch from the current `HEAD`.
+Creation can succeed even when the branch does not contain the current relative directory. In that case Pi Web keeps the new worktree, stays in the current directory, and displays an error. It does not remove the worktree or switch to its root.
 
 ## Removing a Worktree
 
-Use the remove button next to a non-main worktree to remove that checkout.
+Use the remove button next to a non-main worktree. If you remove the currently selected linked worktree, Pi Web returns to the corresponding directory in the main checkout.
 
-Removing a worktree does not delete:
+Removal does not delete the Git branch, Pi Web session history, or the main checkout. Git refuses to remove a checkout with uncommitted or untracked files; Pi Web then offers force removal, which discards those files.
 
-- The Git branch.
-- Pi Web session history.
-- The main checkout.
+## Sessions and Project Grouping
 
-If the worktree has uncommitted or untracked files, Git refuses the removal. Pi Web then offers a force remove action. Force removal discards the uncommitted files in that checkout, so use it only when you no longer need those changes.
+Pi Web groups corresponding directories across checkouts by a canonical identity made from the main repository and checkout-relative path. Thus `/repo/packages/app` and `/linked/packages/app` share a project, while `/repo` remains a separate project. Historical sessions are grouped this way when read; session files are not modified.
 
-## Sessions and Worktrees
-
-Pi Web groups sessions by project root, so sessions from the main checkout and linked worktrees appear together.
-
-Each session still remembers the working directory it was created with. That means:
-
-- A session started in a worktree continues to use that worktree path.
-- A session started in the main checkout continues to use the main checkout.
-- If a worktree has been removed, old sessions from it stay visible under the project so you can still find the history.
+If a linked worktree is later removed, its old sessions remain visible under the canonical project when Pi Web can infer the original checkout layout.
 
 ## Troubleshooting
 
 **I do not see the worktree switcher.**
-Select a Git repository root. Non-Git directories and repo subdirectories show a small hint instead of the switcher.
+Confirm that the selected directory is inside a Git checkout and that Git can list its worktrees.
+
+**A worktree is disabled.**
+That checkout is missing the selected checkout-relative directory, or the mapped path failed a filesystem safety check. Create the directory on that branch before switching.
 
 **A branch cannot be added as a worktree.**
-Git allows a branch to be checked out in only one worktree at a time. Switch to the existing worktree for that branch, or remove it first.
-
-**A removed worktree still shows up in Git.**
-Git can keep prunable worktree records after a checkout disappears. Pi Web filters those out of the switcher.
+Git allows a branch to be checked out in only one worktree at a time. Switch to the existing worktree or remove it first.
 
 **The Explorer shows a different branch than the open chat.**
-The Explorer follows the selected worktree. The chat follows the opened session. Click the session again to move the sidebar back to that session's checkout.
+The Explorer follows the selected worktree directory; the chat follows the opened session. Click the session again to return the sidebar to that session's checkout.

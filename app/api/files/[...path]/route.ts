@@ -73,12 +73,15 @@ function parseFileRequestType(value: string): FileRequestType | null {
   return FILE_REQUEST_TYPE_SET.has(value) ? (value as FileRequestType) : null;
 }
 
-async function getUploadDirectory(segments: string[]): Promise<
+export async function getUploadDirectory(segments: string[]): Promise<
   { directory: string } | { response: NextResponse }
 > {
   const directory = filePathFromApiSegments(segments);
   const allowedRoots = await getAllowedFileRoots();
-  if (!isFilePathAllowed(directory, allowedRoots)) {
+  if (
+    !isFilePathAllowed(directory, allowedRoots)
+    || !isExistingFilePathAllowed(directory, allowedRoots)
+  ) {
     return { response: NextResponse.json({ error: "Access denied" }, { status: 403 }) };
   }
 
@@ -92,22 +95,9 @@ async function getUploadDirectory(segments: string[]): Promise<
     return { response: NextResponse.json({ error: "Upload target is not a directory" }, { status: 400 }) };
   }
 
-  // A browsable directory can be a symlink. Resolve both sides before writes
-  // so a symlink inside an allowed root cannot redirect uploads outside it.
-  const realDirectory = fs.realpathSync(directory);
-  const realRoots = new Set<string>();
-  for (const root of allowedRoots) {
-    try {
-      realRoots.add(fs.realpathSync(root));
-    } catch {
-      // Ignore stale session roots that no longer exist.
-    }
-  }
-  if (!isFilePathAllowed(realDirectory, realRoots)) {
-    return { response: NextResponse.json({ error: "Access denied" }, { status: 403 }) };
-  }
-
-  return { directory: realDirectory };
+  // The shared existing-path check above validates symlink containment and
+  // grant-time real-path identity before this resolved directory is written.
+  return { directory: fs.realpathSync(directory) };
 }
 
 function parseUploadFileNames(value: unknown): string[] | null {
@@ -125,9 +115,6 @@ export async function POST(
 
   try {
     const { path: segments } = await params;
-    const uploadDirectory = await getUploadDirectory(segments);
-    if ("response" in uploadDirectory) return uploadDirectory.response;
-    const { directory } = uploadDirectory;
     const type = request.nextUrl.searchParams.get("type") ?? "upload";
 
     if (type === "upload-check") {
@@ -140,7 +127,9 @@ export async function POST(
       if (validationError) {
         return NextResponse.json({ error: validationError }, { status: 400 });
       }
-      return NextResponse.json(inspectUploadTargets(directory, fileNames));
+      const uploadDirectory = await getUploadDirectory(segments);
+      if ("response" in uploadDirectory) return uploadDirectory.response;
+      return NextResponse.json(inspectUploadTargets(uploadDirectory.directory, fileNames));
     }
 
     if (type !== "upload") {
@@ -174,6 +163,11 @@ export async function POST(
       return NextResponse.json({ error: validationError }, { status: 400 });
     }
 
+    // Resolve only after the potentially long multipart read, then revalidate
+    // again immediately before every filesystem mutation below.
+    const uploadDirectory = await getUploadDirectory(segments);
+    if ("response" in uploadDirectory) return uploadDirectory.response;
+    const { directory } = uploadDirectory;
     const inspection = inspectUploadTargets(directory, fileNames);
     if (strategy === "error" && inspection.conflicts.length > 0) {
       return NextResponse.json({
@@ -205,6 +199,15 @@ export async function POST(
         bytes = Buffer.from(await file.arrayBuffer());
       } catch (error) {
         errors.push({ name: file.name, error: error instanceof Error ? error.message : String(error) });
+        continue;
+      }
+
+      const revalidatedDirectory = await getUploadDirectory(segments);
+      if (
+        "response" in revalidatedDirectory
+        || !samePath(revalidatedDirectory.directory, directory)
+      ) {
+        errors.push({ name: file.name, error: "Upload directory changed during validation" });
         continue;
       }
 

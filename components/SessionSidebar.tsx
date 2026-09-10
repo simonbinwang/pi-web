@@ -13,6 +13,16 @@ import { useI18n } from "@/hooks/useI18n";
 import { DirectoryPicker } from "./DirectoryPicker";
 import { FileExplorer, type FileExplorerHandle } from "./FileExplorer";
 import { SessionSearch } from "./SessionSearch";
+import {
+  cwdAfterCreate,
+  cwdAfterRemove,
+  cwdAfterSelect,
+  selectableWorktreeCwd,
+  WorktreeSelectButton,
+  worktreeControlModel,
+  type WorktreeUiEntry as WorktreeEntry,
+  type WorktreeUiState as WorktreeState,
+} from "./worktree-ui";
 
 // Fixed row height for the session list. SessionItem renders at exactly this
 // height, so the list can be windowed (only the visible slice is mounted).
@@ -123,27 +133,6 @@ interface Props {
   onBackgroundTaskDone?: () => void;
   onRunningSessionIdsChange?: (ids: Set<string>) => void;
   onSessionsChange?: (sessions: SessionInfo[]) => void;
-}
-
-interface WorktreeEntry {
-  path: string;
-  branch: string | null;
-  isMain: boolean;
-}
-
-interface WorktreeState {
-  /** The cwd this data was fetched for — guards against stale responses */
-  forCwd: string;
-  projectRoot: string;
-  /** Stable server-computed identity; never derive OS path semantics here. */
-  projectKey: string;
-  isGit: boolean;
-  /** False when forCwd is a repo subdirectory — the switcher is hidden there
-   *  because subdir sessions keep their own project identity */
-  isTopLevel: boolean;
-  /** Canonical path of the checkout containing forCwd, resolved server-side. */
-  currentWorktreePath: string | null;
-  worktrees: WorktreeEntry[];
 }
 
 interface ProjectSelection {
@@ -666,11 +655,6 @@ export function SessionSidebar({ selectedSessionId, onSelectSession, onNewSessio
     if (worktreeState && worktreeState.forCwd === cwd) {
       return projectSelection(worktreeState.projectRoot, worktreeState.projectKey);
     }
-    // Any path in the loaded worktree list belongs to that project — covers
-    // worktrees without sessions, so switching to them keeps the row mounted.
-    if (worktreeState?.worktrees.some((w) => w.path === cwd)) {
-      return projectSelection(worktreeState.projectRoot, worktreeState.projectKey);
-    }
     const match = allSessions.find((session) => (
       session.cwd === cwd || (session.projectRoot ?? session.cwd) === cwd
     ));
@@ -719,7 +703,7 @@ export function SessionSidebar({ selectedSessionId, onSelectSession, onNewSessio
     setWorktreeLoadingCwd(selectedCwd);
     fetch(`/api/worktrees?cwd=${encodeURIComponent(selectedCwd)}`)
       .then((r) => r.json())
-      .then((d: { projectRoot?: string; projectKey?: string; isGit?: boolean; isTopLevel?: boolean; currentWorktreePath?: string | null; worktrees?: WorktreeEntry[]; error?: string }) => {
+      .then((d: { projectRoot?: string; projectKey?: string; repositoryRoot?: string | null; checkoutRoot?: string | null; checkoutRelativePath?: string; isGit?: boolean; currentWorktreePath?: string | null; worktrees?: WorktreeEntry[]; error?: string }) => {
         if (cancelled) return;
         setWorktreeLoadingCwd(null);
         if (d.error || !d.projectRoot) {
@@ -731,7 +715,9 @@ export function SessionSidebar({ selectedSessionId, onSelectSession, onNewSessio
           projectRoot: d.projectRoot,
           projectKey: d.projectKey ?? d.projectRoot,
           isGit: d.isGit ?? false,
-          isTopLevel: d.isTopLevel ?? false,
+          repositoryRoot: d.repositoryRoot ?? null,
+          checkoutRoot: d.checkoutRoot ?? null,
+          checkoutRelativePath: d.checkoutRelativePath ?? "",
           currentWorktreePath: d.currentWorktreePath ?? null,
           worktrees: d.worktrees ?? [],
         });
@@ -767,17 +753,6 @@ export function SessionSidebar({ selectedSessionId, onSelectSession, onNewSessio
     }
   }, [allSessions, selectedCwd, initialSessionId, skipInitialProjectSelection, onSelectSession, onInitialRestoreDone]);
 
-  // Prefer an exact UI selection while a refetch is in flight. Once the
-  // response catches up, the server-resolved path handles Windows case and
-  // separator differences without teaching the browser OS path semantics.
-  const currentWorktree = worktreeState
-    ? worktreeState.worktrees.find((worktree) => worktree.path === selectedCwd)
-      ?? (worktreeState.forCwd === selectedCwd && worktreeState.currentWorktreePath
-        ? worktreeState.worktrees.find((worktree) => worktree.path === worktreeState.currentWorktreePath)
-        : undefined)
-      ?? worktreeState.worktrees.find((worktree) => worktree.isMain)
-    : undefined;
-  const currentWorktreePath = currentWorktree?.path ?? null;
 
   const commitCustomPath = useCallback(async (candidate?: string) => {
     const path = (candidate ?? customPathValue).trim();
@@ -847,33 +822,66 @@ export function SessionSidebar({ selectedSessionId, onSelectSession, onNewSessio
       const res = await fetch("/api/worktrees", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ cwd: worktreeState.projectRoot, branch }),
+        body: JSON.stringify({ cwd: selectedCwd, branch }),
       });
-      const data = await res.json().catch(() => ({})) as { path?: string; error?: string };
-      if (!res.ok || data.error || !data.path) {
+      const data = await res.json().catch(() => ({})) as {
+        path?: string;
+        targetCwd?: string;
+        available?: boolean;
+        unavailableReason?: WorktreeEntry["unavailableReason"];
+        error?: string;
+      };
+      if (!res.ok || !data.path || !data.targetCwd) {
         setWtError(data.error ?? `HTTP ${res.status}`);
         return;
       }
       setWtNewOpen(false);
       setWtNewBranch("");
+      if (!data.available) {
+        setWtError(data.error ?? t("sidebar.worktreeTargetUnavailable"));
+        setWtRefreshKey((k) => k + 1);
+        return;
+      }
       setWtDropdownOpen(false);
-      // Optimistically register the new worktree so projectFor() resolves
-      // it to the main repo before the refetch lands (keeps AppShell from
-      // treating the new cwd as a different project).
-      setWorktreeState((prev) => prev ? {
-        ...prev,
-        forCwd: data.path!,
-        currentWorktreePath: data.path!,
-        worktrees: [...prev.worktrees, { path: data.path!, branch, isMain: false }],
-      } : prev);
-      setSelectedCwd(data.path);
+      // The next GET computes isCurrent with server-side path semantics.
+      setWorktreeState(null);
+      setSelectedCwd((current) => cwdAfterCreate(current ?? selectedCwd ?? data.targetCwd!, data));
       setWtRefreshKey((k) => k + 1);
     } catch (e) {
       setWtError(e instanceof Error ? e.message : String(e));
     } finally {
       setWtBusy(false);
     }
-  }, [wtNewBranch, wtBusy, worktreeState]);
+  }, [wtNewBranch, wtBusy, worktreeState, selectedCwd, t]);
+
+  const handleSelectWorktree = useCallback(async (worktree: WorktreeEntry) => {
+    if (!worktreeState || !selectedCwd || wtBusy || !selectableWorktreeCwd(worktree)) return;
+    setWtBusy(true);
+    setWtError(null);
+    try {
+      const res = await fetch("/api/worktrees", {
+        method: "PATCH",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ cwd: selectedCwd, path: worktree.path }),
+      });
+      const data = await res.json().catch(() => ({})) as { targetCwd?: string; error?: string };
+      if (!res.ok || !data.targetCwd) {
+        setWtError(data.error ?? `HTTP ${res.status}`);
+        setWtRefreshKey((key) => key + 1);
+        return;
+      }
+      // Do not infer path identity in the browser; refetch server isCurrent.
+      setWorktreeState(null);
+      setSelectedCwd((current) => cwdAfterSelect(current ?? selectedCwd, data));
+      setWtDropdownOpen(false);
+      setWtFilter("");
+      setWtRefreshKey((key) => key + 1);
+    } catch (error) {
+      setWtError(error instanceof Error ? error.message : String(error));
+    } finally {
+      setWtBusy(false);
+    }
+  }, [worktreeState, selectedCwd, wtBusy]);
 
   const handleRemoveWorktree = useCallback(async (path: string, force: boolean) => {
     if (!worktreeState || wtBusy) return;
@@ -883,9 +891,9 @@ export function SessionSidebar({ selectedSessionId, onSelectSession, onNewSessio
       const res = await fetch("/api/worktrees", {
         method: "DELETE",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ cwd: worktreeState.projectRoot, path, force }),
+        body: JSON.stringify({ cwd: selectedCwd, path, force }),
       });
-      const data = await res.json().catch(() => ({})) as { error?: string; dirty?: boolean };
+      const data = await res.json().catch(() => ({})) as { error?: string; dirty?: boolean; fallbackCwd?: string | null };
       if (!res.ok) {
         if (data.dirty && !force) {
           // Dirty worktree — ask the user to confirm a force removal
@@ -896,14 +904,16 @@ export function SessionSidebar({ selectedSessionId, onSelectSession, onNewSessio
         return;
       }
       setWtConfirmRemove(null);
-      if (currentWorktreePath === path) setSelectedCwd(worktreeState.projectRoot);
+      // Always refetch so a removed non-current checkout does not remain visible.
+      setWorktreeState(null);
+      setSelectedCwd((current) => cwdAfterRemove(current ?? selectedCwd ?? "", data));
       setWtRefreshKey((k) => k + 1);
     } catch (e) {
       setWtError(e instanceof Error ? e.message : String(e));
     } finally {
       setWtBusy(false);
     }
-  }, [worktreeState, wtBusy, currentWorktreePath]);
+  }, [worktreeState, wtBusy, selectedCwd]);
 
   // Close dropdowns on outside click
   useEffect(() => {
@@ -974,21 +984,24 @@ export function SessionSidebar({ selectedSessionId, onSelectSession, onNewSessio
   const filteredSessions = selectedProject
     ? sessionsForProject(allSessions, selectedProject.key)
     : allSessions;
-  const showWorktreeSwitcher = Boolean(
-    worktreeState?.isGit
-    && worktreeState.isTopLevel
-    && selectedCwd
-    && selectedProject?.key === worktreeState.projectKey
+  const worktreeModel = worktreeControlModel(
+    worktreeState,
+    selectedCwd,
+    selectedProject?.key ?? null,
+  );
+  const showWorktreeSwitcher = worktreeModel.visible;
+  const currentWorktree = worktreeModel.current;
+  const worktreeUnavailableLabel = (worktree: WorktreeEntry): string => (
+    worktree.unavailableReason === "missing-relative-directory"
+      ? t("sidebar.missingWorktreeDirectory", { path: worktreeState?.checkoutRelativePath || "." })
+      : t("sidebar.invalidWorktreeTarget")
   );
   const worktreeGuide = selectedCwd
     && worktreeState
     && selectedProject?.key === worktreeState.projectKey
     && !showWorktreeSwitcher
     ? (worktreeState.isGit
-        ? {
-             label: t("sidebar.openRepoRoot"),
-             title: t("sidebar.openRepoRootTitle"),
-          }
+        ? null
         : {
              label: t("sidebar.gitRepoRootOnly"),
              title: t("sidebar.gitRepoRootOnlyTitle"),
@@ -1319,20 +1332,16 @@ export function SessionSidebar({ selectedSessionId, onSelectSession, onNewSessio
           />
         )}
 
-        {/* Worktree switcher — shown only for git projects at a checkout top
-            level (repo subdirs keep their own project identity, so switching
-            from them would jump projects). Rendered whenever the selected cwd
-            belongs to the loaded project (not just when forCwd matches), so
-            switching between worktrees of one project keeps the row mounted
-            instead of flickering while data refetches: all worktrees of a
-            project share the same list anyway. */}
+        {/* Worktree switcher — the server maps the selected checkout-relative
+            directory into every checkout. Keeping that mapping server-side
+            lets nested projects use the full control without browser path logic. */}
         {!sessionSearchOpen && showWorktreeSwitcher && (() => {
           if (!worktreeState) return null;
-          const showWtFilter = worktreeState.worktrees.length >= 8;
+          const showWtFilter = worktreeModel.entries.length >= 8;
           const visibleWorktrees = showWtFilter && wtFilter.trim()
-            ? worktreeState.worktrees.filter((w) =>
+            ? worktreeModel.entries.filter((w) =>
                 (w.branch ?? displayCwd(w.path, homeDir)).toLowerCase().includes(wtFilter.trim().toLowerCase()))
-            : worktreeState.worktrees;
+            : worktreeModel.entries;
           return (
             <div ref={wtDropdownRef} style={{ position: "relative", marginTop: 6 }}>
               <button
@@ -1424,7 +1433,7 @@ export function SessionSidebar({ selectedSessionId, onSelectSession, onNewSessio
                   )}
                   <div style={{ maxHeight: "min(40vh, 300px)", overflowY: "auto" }}>
                     {visibleWorktrees.map((wt) => {
-                      const isCurrent = wt.path === currentWorktreePath;
+                      const isCurrent = Boolean(wt.isCurrent);
                       if (wtConfirmRemove === wt.path) {
                         return (
                           <div key={wt.path} style={{ display: "flex", alignItems: "center", gap: 6, padding: "7px 10px", borderBottom: "1px solid var(--border)", background: "rgba(239,68,68,0.06)" }}>
@@ -1453,14 +1462,11 @@ export function SessionSidebar({ selectedSessionId, onSelectSession, onNewSessio
                           className="wt-row"
                           style={{ display: "flex", alignItems: "center", borderBottom: "1px solid var(--border)" }}
                         >
-                          <button
-                            onClick={() => {
-                              setSelectedCwd(wt.path);
-                              setWtDropdownOpen(false);
-                              setWtError(null);
-                              setWtFilter("");
-                            }}
-                            title={wt.path}
+                          <WorktreeSelectButton
+                            entry={wt}
+                            busy={wtBusy}
+                            onSelect={(entry) => void handleSelectWorktree(entry)}
+                            title={wt.disabled ? worktreeUnavailableLabel(wt) : wt.targetCwd}
                             style={{
                               flex: 1,
                               minWidth: 0,
@@ -1471,7 +1477,8 @@ export function SessionSidebar({ selectedSessionId, onSelectSession, onNewSessio
                               background: "var(--bg)",
                               border: "none",
                               color: isCurrent ? "var(--text)" : "var(--text-muted)",
-                              cursor: "pointer",
+                              cursor: wt.disabled ? "not-allowed" : "pointer",
+                              opacity: wt.disabled ? 0.6 : 1,
                               textAlign: "left",
                               fontSize: 11,
                               fontFamily: "var(--font-mono)",
@@ -1484,9 +1491,14 @@ export function SessionSidebar({ selectedSessionId, onSelectSession, onNewSessio
                             ) : (
                               <span style={{ width: 10, flexShrink: 0 }} />
                             )}
-                            <PathLabel text={wt.branch ?? displayCwd(wt.path, homeDir)} style={{ flex: 1 }} />
+                            <span style={{ flex: 1, minWidth: 0 }}>
+                              <PathLabel text={wt.branch ?? displayCwd(wt.path, homeDir)} />
+                              {wt.disabled && (
+                                <PathLabel text={worktreeUnavailableLabel(wt)} style={{ color: "var(--text-dim)", fontSize: 10 }} />
+                              )}
+                            </span>
                             {wt.isMain && <span style={{ flexShrink: 0, color: "var(--text-dim)", fontSize: 10 }}>{t("sidebar.main")}</span>}
-                          </button>
+                          </WorktreeSelectButton>
                           {!wt.isMain && (
                             <button
                               onClick={() => void handleRemoveWorktree(wt.path, false)}

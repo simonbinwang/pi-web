@@ -1,8 +1,8 @@
 import { execFile } from "child_process";
-import { existsSync, mkdirSync, realpathSync } from "fs";
-import { basename, dirname, join, resolve } from "path";
+import { existsSync, mkdirSync, realpathSync, statSync } from "fs";
+import { basename, dirname, join, relative, resolve } from "path";
 import { promisify } from "util";
-import { allowFileRoot } from "./allowed-roots";
+import { isExistingPathWithinRoots, isPathWithinRoots } from "./path-security";
 import { samePath, toNativePath } from "./paths";
 
 const execFileAsync = promisify(execFile);
@@ -17,21 +17,40 @@ const execFileAsync = promisify(execFile);
 // ============================================================================
 
 export interface ProjectInfo {
+  /** Canonical workspace identity: main repository root + checkout-relative path. */
   projectRoot: string;
+  /** Main checkout root shared by all worktrees. */
+  repositoryRoot: string | null;
+  /** Checkout containing cwd (main or linked). */
+  checkoutRoot: string | null;
+  /** Path from checkoutRoot to cwd; empty at a checkout root. */
+  checkoutRelativePath: string;
   /** Current branch of the cwd, null for non-git dirs or detached HEAD */
   branch: string | null;
-  /** True when cwd is a linked worktree (not the main checkout) */
+  /** True when cwd is inside a linked worktree (not the main checkout). */
   isWorktree: boolean;
-  /** True when cwd is the top-level directory of a checkout (main or linked).
-   *  False for repo subdirectories and non-git dirs — the worktree switcher
-   *  is only meaningful at the top level. */
+  /** True when cwd is the top-level directory of a checkout (main or linked). */
   isTopLevel: boolean;
 }
 
+export type WorktreeUnavailableReason =
+  | "missing-relative-directory"
+  | "not-a-directory"
+  | "outside-checkout";
+
 export interface WorktreeInfo {
+  /** Git-verified checkout root. */
   path: string;
   branch: string | null;
   isMain: boolean;
+  /** cwd in this checkout corresponding to the selected checkout-relative path. */
+  targetCwd: string;
+  available: boolean;
+  unavailableReason?: WorktreeUnavailableReason;
+  /** Real path captured by the same validation that marked this target available. */
+  targetRealPath?: string;
+  /** Set by the HTTP projection after server-side path comparison. */
+  isCurrent?: boolean;
 }
 
 declare global {
@@ -74,23 +93,51 @@ function realPathOrSelf(filePath: string): string {
  * under the main repo instead of letting them dangle as a phantom project.
  * The dir name is the sanitized branch name — close enough for display.
  */
-function inferRemovedWorktree(cwd: string): ProjectInfo | null {
-  const parent = dirname(cwd);
-  if (!parent.endsWith("-worktrees")) return null;
-  const repoRoot = parent.slice(0, -"-worktrees".length);
-  if (!repoRoot || !existsSync(join(repoRoot, ".git"))) return null;
-  return { projectRoot: realPathOrSelf(repoRoot), branch: basename(cwd), isWorktree: true, isTopLevel: true };
+function isWorktreeContainerPath(filePath: string): boolean {
+  const suffix = "-worktrees";
+  const candidate = process.platform === "win32" ? filePath.toLowerCase() : filePath;
+  return candidate.endsWith(suffix);
 }
 
-export async function resolveProject(cwd: string): Promise<ProjectInfo> {
+function inferRemovedWorktree(cwd: string): ProjectInfo | null {
+  let checkoutRoot = resolve(cwd);
+  while (dirname(checkoutRoot) !== checkoutRoot && !isWorktreeContainerPath(dirname(checkoutRoot))) {
+    checkoutRoot = dirname(checkoutRoot);
+  }
+  const worktreesParent = dirname(checkoutRoot);
+  if (!isWorktreeContainerPath(worktreesParent)) return null;
+  const repoRoot = worktreesParent.slice(0, -"-worktrees".length);
+  if (!repoRoot || !existsSync(join(repoRoot, ".git"))) return null;
+  const checkoutRelativePath = relative(checkoutRoot, resolve(cwd));
+  const repositoryRoot = realPathOrSelf(repoRoot);
+  return {
+    projectRoot: resolve(repositoryRoot, checkoutRelativePath),
+    repositoryRoot,
+    checkoutRoot,
+    checkoutRelativePath,
+    branch: basename(checkoutRoot),
+    isWorktree: true,
+    isTopLevel: checkoutRelativePath === "",
+  };
+}
+
+export async function resolveProject(cwd: string, options: { fresh?: boolean } = {}): Promise<ProjectInfo> {
   const cache = getProjectCache();
   const cached = cache.get(cwd);
-  if (cached && cached.expiresAt > Date.now()) return cached.info;
+  if (!options.fresh && cached && cached.expiresAt > Date.now()) return cached.info;
 
   let info: ProjectInfo;
   try {
     if (!existsSync(cwd)) {
-      info = inferRemovedWorktree(cwd) ?? { projectRoot: cwd, branch: null, isWorktree: false, isTopLevel: false };
+      info = inferRemovedWorktree(cwd) ?? {
+        projectRoot: cwd,
+        repositoryRoot: null,
+        checkoutRoot: null,
+        checkoutRelativePath: "",
+        branch: null,
+        isWorktree: false,
+        isTopLevel: false,
+      };
       cache.set(cwd, { info, expiresAt: Date.now() + PROJECT_CACHE_TTL_MS });
       return info;
     }
@@ -105,22 +152,33 @@ export async function resolveProject(cwd: string): Promise<ProjectInfo> {
     const [commonDir, gitDir, toplevel] = [commonDirRaw, gitDirRaw, toplevelRaw].map(toNativePath);
     // git prints resolved (symlink-free) paths; normalize cwd the same way
     const realCwd = realPathOrSelf(cwd);
-    // For a linked worktree, --git-dir differs from --git-common-dir.
-    // Only collapse *worktree toplevels* into the main repo. A session whose
-    // cwd is a subdirectory of a repo keeps its own project identity —
-    // grouping subdirs under the repo root would change where new sessions
-    // are created for existing users.
-    const isTopLevel = samePath(toplevel, realCwd);
-    const isWorktreeTopLevel = !samePath(gitDir, commonDir) && isTopLevel;
-    const topLevelProjectRoot = isWorktreeTopLevel ? dirname(commonDir) : toplevel;
+    const checkoutRoot = realPathOrSelf(toplevel);
+    const repositoryRoot = realPathOrSelf(dirname(commonDir));
+    const checkoutRoots = new Set([checkoutRoot]);
+    if (!isPathWithinRoots(realCwd, checkoutRoots) || !isExistingPathWithinRoots(realCwd, checkoutRoots)) {
+      throw new Error(`cwd is outside its Git checkout: ${cwd}`);
+    }
+    const checkoutRelativePath = relative(checkoutRoot, realCwd);
+    const isTopLevel = checkoutRelativePath === "";
     info = {
-      projectRoot: isTopLevel ? realPathOrSelf(topLevelProjectRoot) : cwd,
+      projectRoot: resolve(repositoryRoot, checkoutRelativePath),
+      repositoryRoot,
+      checkoutRoot,
+      checkoutRelativePath,
       branch: ref && ref !== "HEAD" ? ref : null,
-      isWorktree: isWorktreeTopLevel,
+      isWorktree: !samePath(gitDir, commonDir),
       isTopLevel,
     };
   } catch {
-    info = { projectRoot: cwd, branch: null, isWorktree: false, isTopLevel: false };
+    info = {
+      projectRoot: cwd,
+      repositoryRoot: null,
+      checkoutRoot: null,
+      checkoutRelativePath: "",
+      branch: null,
+      isWorktree: false,
+      isTopLevel: false,
+    };
   }
 
   cache.set(cwd, { info, expiresAt: Date.now() + PROJECT_CACHE_TTL_MS });
@@ -142,9 +200,14 @@ async function getRepoRoot(cwd: string): Promise<string> {
 }
 
 export async function listWorktrees(cwd: string): Promise<WorktreeInfo[]> {
+  const project = await resolveProject(cwd);
+  if (!project.repositoryRoot || !project.checkoutRoot) {
+    throw new Error(`cwd is not inside a Git checkout: ${cwd}`);
+  }
   const out = await git(cwd, ["worktree", "list", "--porcelain"]);
-  const worktrees: WorktreeInfo[] = [];
-  let current: (Partial<WorktreeInfo> & { prunable?: boolean }) | null = null;
+  const checkoutRelativePath = project.checkoutRelativePath;
+  const worktrees: Array<Pick<WorktreeInfo, "path" | "branch" | "isMain">> = [];
+  let current: (Partial<Pick<WorktreeInfo, "path" | "branch">> & { prunable?: boolean }) | null = null;
 
   const flush = () => {
     if (current?.path) {
@@ -175,15 +238,62 @@ export async function listWorktrees(cwd: string): Promise<WorktreeInfo[]> {
     }
   }
   flush();
-  return worktrees;
+  return worktrees.map((worktree) => ({
+    ...worktree,
+    ...mapWorktreeTarget(worktree.path, checkoutRelativePath),
+  }));
 }
 
-function findWorktreeByPath(worktrees: readonly WorktreeInfo[], candidate: string): WorktreeInfo | undefined {
+export function mapWorktreeTarget(
+  checkoutPath: string,
+  checkoutRelativePath: string,
+): Pick<WorktreeInfo, "targetCwd" | "targetRealPath" | "available" | "unavailableReason"> {
+  const targetCwd = resolve(checkoutPath, checkoutRelativePath);
+  const roots = new Set([checkoutPath]);
+  if (!isPathWithinRoots(targetCwd, roots)) {
+    return { targetCwd, available: false, unavailableReason: "outside-checkout" };
+  }
+  if (!existsSync(targetCwd)) {
+    return { targetCwd, available: false, unavailableReason: "missing-relative-directory" };
+  }
+  try {
+    if (!statSync(targetCwd).isDirectory()) {
+      return { targetCwd, available: false, unavailableReason: "not-a-directory" };
+    }
+  } catch {
+    return { targetCwd, available: false, unavailableReason: "missing-relative-directory" };
+  }
+  let targetRealPath: string;
+  try {
+    targetRealPath = realpathSync(targetCwd);
+  } catch {
+    return { targetCwd, available: false, unavailableReason: "missing-relative-directory" };
+  }
+  const realCheckoutPath = realPathOrSelf(checkoutPath);
+  if (
+    !isExistingPathWithinRoots(targetCwd, roots)
+    || !isPathWithinRoots(targetRealPath, new Set([realCheckoutPath]))
+  ) {
+    return { targetCwd, available: false, unavailableReason: "outside-checkout" };
+  }
+  return { targetCwd, targetRealPath, available: true };
+}
+
+export function findWorktreeByPath(worktrees: readonly WorktreeInfo[], candidate: string): WorktreeInfo | undefined {
   return worktrees.find((worktree) => samePath(worktree.path, candidate));
 }
 
 export function findCurrentWorktreePath(worktrees: readonly WorktreeInfo[], cwd: string): string | null {
-  return findWorktreeByPath(worktrees, realPathOrSelf(cwd))?.path ?? null;
+  // resolveProject() accepts a symlink that resolves inside a checkout, so use
+  // that same real cwd when identifying the owning worktree.
+  const realCwd = realPathOrSelf(cwd);
+  const rootsContainingCwd = worktrees.filter((worktree) => (
+    isPathWithinRoots(realCwd, new Set([worktree.path]))
+    && isExistingPathWithinRoots(realCwd, new Set([worktree.path]))
+  ));
+  // Worktree roots cannot normally overlap, but selecting the most specific
+  // match makes containment deterministic even for unusual repository paths.
+  return rootsContainingCwd.sort((a, b) => b.path.length - a.path.length)[0]?.path ?? null;
 }
 
 function sanitizeBranchForDir(branch: string): string {
@@ -224,7 +334,6 @@ export async function addWorktree(cwd: string, branch: string): Promise<{ path: 
     throw new Error(extractGitError(error));
   }
 
-  allowFileRoot(worktreePath);
   invalidateProjectCache();
   return { path: worktreePath, branch: trimmed };
 }

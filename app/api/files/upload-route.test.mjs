@@ -9,9 +9,10 @@ async function loadSubjects() {
   const jiti = createJiti(import.meta.url, {
     alias: { "@": path.resolve(new URL("../../..", import.meta.url).pathname) },
   });
-  const { getUploadDirectory } = await jiti.import("./[...path]/route.ts");
+  const { POST } = await jiti.import("./[...path]/route.ts");
+  const { NextRequest } = await jiti.import("next/server");
   const { allowFileRoot } = await jiti.import("../../../lib/file-access.ts");
-  return { allowFileRoot, getUploadDirectory };
+  return { allowFileRoot, NextRequest, POST };
 }
 
 test("upload rejects an explicit root retargeted after authorization", async (t) => {
@@ -25,7 +26,7 @@ test("upload rejects an explicit root retargeted after authorization", async (t)
   globalThis.__piAdditionalAllowedRootRealPaths?.clear();
   globalThis.__piAllowedRootsCache = undefined;
 
-  const { allowFileRoot, getUploadDirectory } = await loadSubjects();
+  const { allowFileRoot, NextRequest, POST } = await loadSubjects();
   assert.equal(allowFileRoot(allowed), true);
   globalThis.__piAllowedRootsCache = {
     roots: new Set([allowed.replace(/\\/g, "/")]),
@@ -35,7 +36,11 @@ test("upload rejects an explicit root retargeted after authorization", async (t)
   fs.symlinkSync(outside, allowed, process.platform === "win32" ? "junction" : "dir");
 
   const segments = allowed.split(/[\\/]+/).filter(Boolean);
-  const result = await getUploadDirectory(segments);
-  assert.ok("response" in result);
-  assert.equal(result.response.status, 403);
+  const request = new NextRequest(`http://localhost/api/files/${segments.join("/")}?type=upload-check`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ fileNames: ["probe.txt"] }),
+  });
+  const response = await POST(request, { params: Promise.resolve({ path: segments }) });
+  assert.equal(response.status, 403);
 });

@@ -12,7 +12,9 @@ export interface RecentProject {
 export function getRecentProjects(sessions: readonly SessionInfo[]): RecentProject[] {
   const latestByProject = new Map<string, { root: string; modified: string }>();
   for (const session of sessions) {
-    const root = session.projectRoot ?? session.cwd;
+    // Keep the stable canonical identity separate from the actual checkout cwd.
+    // The canonical main-checkout path may not exist for a historical session.
+    const root = session.cwd ?? session.projectRoot;
     if (!root) continue;
     const key = workspaceKeyOf(session);
     const previous = latestByProject.get(key);

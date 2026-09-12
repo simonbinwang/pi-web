@@ -1460,7 +1460,9 @@ function CompactionFileList({ title, files }: { title: string; files: string[] }
 function CustomMessageView({ message, cwd, onOpenFile }: { message: CustomMessage; cwd?: string; onOpenFile?: (filePath: string) => void }) {
   const { t } = useI18n();
   const isHiddenDisplay = message.display === false;
-  const [contentExpanded, setContentExpanded] = useState(!isHiddenDisplay);
+  const isSubagentNotification = message.customType === "pi-web:subagent-notification";
+  const hasCollapsibleContent = isHiddenDisplay || isSubagentNotification;
+  const [contentExpanded, setContentExpanded] = useState(!hasCollapsibleContent);
   const [detailsExpanded, setDetailsExpanded] = useState(false);
   const [copied, setCopied] = useState(false);
   const text = getMessageText(message.content);
@@ -1573,12 +1575,11 @@ function CustomMessageView({ message, cwd, onOpenFile }: { message: CustomMessag
                {copied ? t("i18n.copied") : t("i18n.copy")}
             </button>
           ) : null}
-          {(hasDetails || isHiddenDisplay) && (
+          {hasDetails && !isHiddenDisplay && (
             <button
-              onClick={() => {
-                if (isHiddenDisplay) setContentExpanded((v) => !v);
-                else setDetailsExpanded((v) => !v);
-              }}
+              type="button"
+              aria-expanded={detailsExpanded}
+              onClick={() => setDetailsExpanded((v) => !v)}
               style={{
                 marginLeft: "auto",
                 padding: "3px 7px",
@@ -1589,9 +1590,25 @@ function CustomMessageView({ message, cwd, onOpenFile }: { message: CustomMessag
                 fontSize: 11,
               }}
             >
-              {isHiddenDisplay
-                 ? (contentExpanded ? t("i18n.collapse") : t("i18n.expand"))
-                 : (detailsExpanded ? t("i18n.hideDetails") : t("i18n.showDetails"))}
+              {detailsExpanded ? t("i18n.hideDetails") : t("i18n.showDetails")}
+            </button>
+          )}
+          {hasCollapsibleContent && (
+            <button
+              type="button"
+              aria-expanded={contentExpanded}
+              onClick={() => setContentExpanded((v) => !v)}
+              style={{
+                marginLeft: hasDetails && !isHiddenDisplay ? 0 : "auto",
+                padding: "3px 7px",
+                border: "none",
+                background: "none",
+                color: "var(--text-dim)",
+                cursor: "pointer",
+                fontSize: 11,
+              }}
+            >
+              {contentExpanded ? t("i18n.collapse") : t("i18n.expand")}
             </button>
           )}
         </div>

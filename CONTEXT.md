@@ -23,3 +23,13 @@ _Avoid_: New session, branch
 **In-session Branch**:
 An alternate conversation path stored within the same session.
 _Avoid_: Session fork, forked session
+
+**Sub-agent Result**:
+The outcome a Sub-agent delivers into its parent Agent's conversation.
+It is distinct from the Sub-agent Transcript.
+_Avoid_: Sub-agent message, Sub-agent content
+
+**Sub-agent Transcript**:
+The conversation history belonging to a Sub-agent's own session.
+It is not the result displayed in the parent Agent's conversation.
+_Avoid_: Sub-agent result

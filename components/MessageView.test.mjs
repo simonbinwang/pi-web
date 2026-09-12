@@ -48,6 +48,36 @@ test("keeps streamed tool input out of collapsed markup while counting it", () =
   assert.equal(getTokenEstimateText(block), block.rawInput);
 });
 
+test("collapses background subagent results without changing ordinary custom messages", () => {
+  const result = `${"Subagent result ".repeat(12)}END-OF-RESULT`;
+  const notification = {
+    role: "custom",
+    customType: "pi-web:subagent-notification",
+    content: result,
+    display: true,
+    details: {
+      kind: "pi-web-subagent",
+      sessionId: "child-session",
+      status: "completed",
+    },
+  };
+
+  const html = renderMessage(notification);
+  assert.match(html, /Subagent result/);
+  assert.doesNotMatch(html, /END-OF-RESULT/);
+  assert.match(html, /aria-expanded="false"/);
+  assert.match(html, />Show details</);
+  assert.match(html, />Expand</);
+
+  const ordinaryHtml = renderMessage({
+    ...notification,
+    customType: "extension-notification",
+  });
+  assert.match(ordinaryHtml, /END-OF-RESULT/);
+  assert.match(ordinaryHtml, />Show details</);
+  assert.doesNotMatch(ordinaryHtml, />Expand</);
+});
+
 test("renders subagents as standard tool calls with only an extra session button", () => {
   const block = {
     type: "toolCall",
